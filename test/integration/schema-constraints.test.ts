@@ -54,6 +54,8 @@ async function seedWallet(balance = '100.00'): Promise<Seed> {
        VALUES ($1, $2, 'BRL', $3, 1, now(), now())`,
       [walletId, `player-${walletId}`, balance],
     );
+    // A zero opening balance has no OPENING transaction (ck_wager_tx_amount forbids a 0.00 OPENING).
+    if (balance === '0.00') return;
     await client.query(
       `INSERT INTO wager_transactions (id, provider_id, external_transaction_id, idempotency_key, payload_hash, wallet_id,
          player_id, round_id, game_id, kind, amount, currency, status, balance_after, correlation_id, created_at, updated_at, processed_at)
