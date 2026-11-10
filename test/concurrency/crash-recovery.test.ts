@@ -92,8 +92,9 @@ describe('outbox relay killed', () => {
     expect(expected.length).toBeGreaterThan(0);
 
     const doomed = await spawn('doomed-relay', { ...env, FAULT_INJECTION: 'outbox-after-claim' }, false);
-    await Promise.race([doomed.exited, sleep(30_000)]);
-    expect(doomed.proc.exitCode).not.toBeNull();
+    // Killed by the injected fault (SIGKILL): Bun reports it in signalCode, exitCode stays null.
+    expect(await Promise.race([doomed.exited.then(() => 'died'), sleep(30_000).then(() => 'still running')])).toBe('died');
+    expect(doomed.proc.signalCode ?? doomed.proc.exitCode).not.toBeNull();
     expect((await pendingIds(walletIds)).length).toBe(expected.length); // nothing lost, nothing marked
 
     await spawn('takeover-relay', env);
@@ -109,8 +110,9 @@ describe('outbox relay killed', () => {
     const expected = await pendingIds(walletIds);
 
     const doomed = await spawn('doomed-relay-2', { ...env, FAULT_INJECTION: 'outbox-after-publish-before-commit' }, false);
-    await Promise.race([doomed.exited, sleep(30_000)]);
-    expect(doomed.proc.exitCode).not.toBeNull();
+    // Killed by the injected fault (SIGKILL): Bun reports it in signalCode, exitCode stays null.
+    expect(await Promise.race([doomed.exited.then(() => 'died'), sleep(30_000).then(() => 'still running')])).toBe('died');
+    expect(doomed.proc.signalCode ?? doomed.proc.exitCode).not.toBeNull();
 
     await spawn('takeover-relay-2', env);
     await eventually(async () => (await pendingIds(walletIds)).length === 0, 30_000);
