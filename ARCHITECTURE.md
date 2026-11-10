@@ -213,6 +213,12 @@ simultaneamente para a mesma wallet).
 - **Fluxo**: lookup pela chave (fast path, sem lock) → lock da wallet → **lookup de novo sob o
   lock** (autoritativo: todo escritor da wallet está serializado atrás de nós) → aplica. Uma corrida
   com a mesma chave em wallets diferentes termina em `23505` → rollback → retry → caminho de replay.
+- **Corrida encontrada pelos testes de concorrência:** cada lookup tem duas leituras, primeiro pela
+  chave e depois pelo `externalTransactionId`. Em `READ COMMITTED` cada statement enxerga o último
+  commit, então uma requisição com a **mesma** chave podia commitar entre as duas leituras. A segunda
+  leitura respondia `409 EXTERNAL_TRANSACTION_ID_CONFLICT` em vez de replay. Saldo e ledger nunca
+  foram afetados. Correção: se a linha achada pelo id externo tem a mesma chave, o caminho é
+  replay/conflito por hash. Há um teste de unidade determinístico que reproduz a janela.
 - **Replay**: mesma chave + mesmo hash → a transação original, com status, `failureCode` e o
   **saldo observado na época**; mesma resposta HTTP (mesmo status) com `idempotentReplay: true` e
   header `Idempotent-Replayed: true`. Vale também para rejeições e para `PENDING_REFERENCE` (que
@@ -467,6 +473,9 @@ Corpo de erro único: `{ "error": { "code", "message", "retryable", ... }, "corr
 - **Determinismo**: os cenários são desenhados para ter resultado exato independente da ordem
   (ex.: 100 apostas de 10.00 em 500.00 → exatamente 50/50; 130 apostas por HTTP+SQS em 3 instâncias
   → exatamente 50 débitos). Isolamento por filas únicas por arquivo e wallets novas por teste.
+- **CI** (`.github/workflows/ci.yml`): todas as suítes rodam em Linux com containers reais a cada
+  push, além da stack completa com 3 réplicas e o teste de carga. Resultado atual: 114 testes de
+  unidade, 58 de integração e 17 de concorrência, 0 falhas, verdes em execuções consecutivas.
 - **Invariante final de todos os arquivos** (`assertGlobalInvariants`): saldo == ledger reconstruído,
   versão == último lançamento, nenhum saldo negativo, cada transação `PROCESSED` que move saldo tem
   exatamente 1 lançamento (e as demais nenhum), nenhuma referência revertida duas vezes.

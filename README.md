@@ -203,7 +203,54 @@ test e o teste de carga, cujo relatório fica no resumo da execução e como art
 ### Resultados do teste de carga
 
 <!-- LOAD-RESULTS:START -->
-_Preenchido com o relatório do CI._
+Execução registrada no CI (GitHub Actions, 2026-11-10). Cada push gera um relatório novo no resumo da
+execução.
+
+**Ambiente:** runner `ubuntu-latest`, 2 vCPU (AMD EPYC 7763), 7,7 GiB de RAM. **Tudo na mesma VM**:
+PostgreSQL, MiniStack, Keycloak, as 3 réplicas, o nginx e o próprio gerador de carga.
+
+**Metodologia:** 32 usuários virtuais em laço fechado por 45 s, através do nginx e com tokens do
+Keycloak. São 50 wallets, e 20% das operações vão para **uma única wallet quente**. Mix de ~70% BET,
+~18% WIN, ~6% LOSS e ~6% REFUND de uma BET anterior; 5% das requisições são reenvios idênticos
+(replay). A latência é medida no cliente; o lag da outbox é medido no PostgreSQL
+(`published_at − occurred_at`).
+
+| Métrica | Valor |
+|---|---|
+| Requisições | 3957 (BET 2618, WIN 685, LOSS 225, REFUND 228, reenvios 201) |
+| Throughput | 87,0 req/s |
+| Latência p50 / p95 / p99 / máx (todas) | 168 / 1589 / 2580 / 4899 ms |
+| — só a wallet quente (861 req) p50 / p95 / p99 | 980 / 2550 / 3798 ms |
+| — demais 49 wallets (3096 req) p50 / p95 / p99 | 130 / 416 / 584 ms |
+| Status | 201: 3956 · 202: 1 |
+| Taxa de erro (5xx + rede) | **0%** |
+| Replays idempotentes detectados pelo servidor | 201 (= 201 reenvios enviados) |
+| Conflitos de concorrência / retries | 0 / 0 |
+| Espera média pelo lock da wallet | 217 ms |
+| Lag da outbox (pendente mais antigo, máx. durante o run) | 3,8 s |
+| Lag de publicação p50 / p95 / p99 / máx | 262 / 2970 / 3646 / 4659 ms (7288 eventos) |
+| Wallets com saldo ≠ ledger ao final | **0** |
+
+**Leitura honesta dos números:**
+- **A cauda de latência vem da wallet quente, por desenho.** O lock de linha serializa as transações
+  de uma mesma wallet. Com cerca de 6 usuários virtuais disputando a mesma linha, cada requisição
+  espera a fila: p50 de ~1 s nessa wallet contra 130 ms nas outras. O lock não gerou retries nem
+  conflitos: a espera é a fila do próprio PostgreSQL, sem trabalho desperdiçado. É o custo esperado
+  de garantir que cada débito veja o saldo do anterior (ver `ARCHITECTURE.md` §4 e §12).
+- **O throughput é limitado pelo ambiente, não pelo desenho.** Os 2 vCPU são compartilhados por
+  todos os processos, inclusive o gerador. Os números servem para comparar execuções, não como
+  capacidade de produção.
+- **O lag da outbox sobe sob saturação de CPU, mas é limitado e drena.** Foram ~160 eventos/s,
+  publicados em lotes de 10 (limite do `SendMessageBatch`) por 3 relays. Ao fim do run a outbox
+  voltou a zero, o que o teste verifica antes da checagem final. Para reduzir o lag: mais lotes por
+  ciclo ou relays com publicação paralela.
+- **Correção sob carga:** nenhum erro, cada reenvio foi reconhecido como replay e nenhuma wallet
+  divergiu do ledger.
+- **O único 202** foi um REFUND que chegou antes de a sua BET terminar de processar. Ele ficou
+  `PENDING_REFERENCE` e foi resolvido pelo worker, o que mostra o fluxo de referência fora de
+  ordem funcionando sob carga.
+- **Limitações:** é uma única execução em VM compartilhada (há ruído entre runs). O p99 inclui o
+  nginx e o enfileiramento no pool de conexões.
 <!-- LOAD-RESULTS:END -->
 
 ---
