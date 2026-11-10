@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { parseSubmitWagerTransactionCommand } from '../../src/application/commands/submit-wager-transaction.command';
 import { IdempotencyConflictError, InboxConflictError } from '../../src/application/errors';
+import type { UnitOfWork } from '../../src/application/ports/repositories';
 import { CreateWalletUseCase } from '../../src/application/use-cases/create-wallet.use-case';
 import { ResolvePendingReferencesUseCase } from '../../src/application/use-cases/resolve-pending-references.use-case';
 import {
@@ -252,6 +253,49 @@ describe('idempotency', () => {
     const error = await send('BET', '10.00', 'bet-1', { key: 'key-2' }).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(IdempotencyConflictError);
     expect((error as IdempotencyConflictError).code).toBe('EXTERNAL_TRANSACTION_ID_CONFLICT');
+  });
+
+  test('same key committed between the key lookup and the external-id lookup is a replay (READ COMMITTED race)', async () => {
+    const first = tx(await send('BET', '10.00', 'bet-race'));
+    // The key lookup "ran before" the concurrent commit; the external-id lookup "after" it.
+    const racingUow: UnitOfWork = {
+      run: (work) =>
+        new InMemoryUnitOfWork(store).run((repos) =>
+          work({ ...repos, transactions: { ...repos.transactions, findByIdempotencyKey: async () => null } }),
+        ),
+    };
+    const racing = new SubmitWagerTransactionUseCase(
+      racingUow,
+      new WagerTransactionProcessor(sequentialIds, new ReferenceRetryPolicy({ baseDelayMs: 1, maxDelayMs: 1, maxAttempts: 1, ttlMs: 1 })),
+      sequentialIds,
+      clock,
+      noopMetrics,
+      silentLogger,
+      { lockTimeoutMs: 1_000, maxConflictRetries: 1 },
+    );
+    const payload = {
+      providerId: 'provider-a',
+      externalTransactionId: 'bet-race',
+      playerId: PLAYER,
+      walletId,
+      roundId: 'round-1',
+      gameId: 'fortune-chimp',
+      kind: 'BET',
+      money: { amount: '10.00', currency: 'BRL' },
+    };
+    const replay = await racing.execute(parseSubmitWagerTransactionCommand(payload, 'provider-a:bet-race'), {
+      source: 'http',
+      correlationId: 'c',
+    });
+    expect(replay.type === 'transaction' && replay.replay && replay.transaction.id).toBe(first.id);
+    const conflict = await racing
+      .execute(parseSubmitWagerTransactionCommand({ ...payload, money: { amount: '11.00', currency: 'BRL' } }, 'provider-a:bet-race'), {
+        source: 'http',
+        correlationId: 'c',
+      })
+      .catch((error: unknown) => error);
+    expect((conflict as IdempotencyConflictError).code).toBe('IDEMPOTENCY_KEY_CONFLICT');
+    expect(balance()).toBe('90.00');
   });
 
   test('rejected transactions replay their rejection', async () => {

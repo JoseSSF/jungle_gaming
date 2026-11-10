@@ -185,18 +185,15 @@ export class SubmitWagerTransactionUseCase {
     command: SubmitWagerTransactionCommand,
   ): Promise<SubmitResult | null> {
     const existing = await repos.transactions.findByIdempotencyKey(command.providerId, command.idempotencyKey);
-    if (existing) {
-      if (!existing.matchesPayload(command.payloadHash)) {
-        throw new IdempotencyConflictError(
-          'IDEMPOTENCY_KEY_CONFLICT',
-          'Idempotency-Key was already used with a different payload',
-          existing.id,
-        );
-      }
-      return { type: 'transaction', transaction: existing, replay: true };
-    }
+    if (existing) return this.replayOrConflict(existing, command);
+
     const sameExternalId = await repos.transactions.findByExternalId(command.providerId, command.externalTransactionId);
     if (sameExternalId) {
+      // READ COMMITTED: a concurrent request with the SAME key may have committed between the
+      // two lookups above. Same key → it is the replay path, not an external-id conflict.
+      if (sameExternalId.idempotencyKey === command.idempotencyKey) {
+        return this.replayOrConflict(sameExternalId, command);
+      }
       throw new IdempotencyConflictError(
         'EXTERNAL_TRANSACTION_ID_CONFLICT',
         'externalTransactionId was already submitted under another Idempotency-Key',
@@ -204,6 +201,17 @@ export class SubmitWagerTransactionUseCase {
       );
     }
     return null;
+  }
+
+  private replayOrConflict(existing: WagerTransaction, command: SubmitWagerTransactionCommand): SubmitResult {
+    if (!existing.matchesPayload(command.payloadHash)) {
+      throw new IdempotencyConflictError(
+        'IDEMPOTENCY_KEY_CONFLICT',
+        'Idempotency-Key was already used with a different payload',
+        existing.id,
+      );
+    }
+    return { type: 'transaction', transaction: existing, replay: true };
   }
 
   private newTransaction(command: SubmitWagerTransactionCommand, options: SubmitOptions, now: Date): WagerTransaction {
