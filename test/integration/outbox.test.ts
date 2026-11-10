@@ -42,13 +42,13 @@ const brokenBroker: EventPublisher = {
 };
 
 /** A publisher "instance": its own connection pool, like a separate process. */
-async function publisherInstance(publisher: EventPublisher): Promise<PublishOutboxUseCase> {
+async function publisherInstance(publisher: EventPublisher, backoffMs = 300): Promise<PublishOutboxUseCase> {
   const config = loadConfig(testEnv(env));
   const orm = await MikroORM.init(buildOrmConfig(config));
   orms.push(orm);
   return new PublishOutboxUseCase(new MikroOrmUnitOfWork(orm), publisher, systemClock, noopMetrics, silentLogger, noFaults, {
     batchSize: 5,
-    backoff: { baseDelayMs: 300, maxDelayMs: 300 },
+    backoff: { baseDelayMs: backoffMs, maxDelayMs: backoffMs },
   });
 }
 
@@ -127,7 +127,8 @@ describe('outbox relay', () => {
   test('broker failures are rescheduled with backoff and published later (nothing lost)', async () => {
     const walletIds = await createTraffic();
     const expected = await pendingEventIdsFor(walletIds);
-    const failing = await publisherInstance(brokenBroker);
+    // Backoff long enough that no row becomes due again while the failing loop is still running.
+    const failing = await publisherInstance(brokenBroker, 3_000);
     while ((await failing.publishOnce()) > 0) {
       // every due row gets attempts++ and a future next_attempt_at
     }
@@ -139,7 +140,7 @@ describe('outbox relay', () => {
 
     const healthy = await publisherInstance(new RecordingPublisher(sqsPublisher()));
     expect(await healthy.publishOnce()).toBe(0); // not due yet
-    await sleep(400);
+    await sleep(3_200);
     while ((await healthy.publishOnce()) > 0) {
       // publish after backoff
     }
