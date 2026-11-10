@@ -194,6 +194,20 @@ erro, conflitos de concorrência, outbox lag e a verificação final saldo == le
 
 ---
 
+### Integração contínua
+
+`.github/workflows/ci.yml` roda em todo push, em Linux com Docker: typecheck + unidade; integração e
+concorrência contra os containers reais; e a stack completa (3 réplicas + nginx + Keycloak) com smoke
+test e o teste de carga, cujo relatório fica no resumo da execução e como artefato `load-report`.
+
+### Resultados do teste de carga
+
+<!-- LOAD-RESULTS:START -->
+_Preenchido com o relatório do CI._
+<!-- LOAD-RESULTS:END -->
+
+---
+
 ## Estrutura
 
 ```

@@ -28,6 +28,7 @@ const keycloakUrl = process.env.KEYCLOAK_URL ?? 'http://localhost:8080';
 
 interface Sample {
   op: string;
+  hot: boolean;
   status: number;
   ms: number;
 }
@@ -129,7 +130,7 @@ async function main(): Promise<void> {
         body: JSON.stringify(payload),
       });
       await response.arrayBuffer();
-      samples.push({ op, status: response.status, ms: performance.now() - started });
+      samples.push({ op, hot: payload.walletId === hot?.walletId, status: response.status, ms: performance.now() - started });
     } catch {
       networkErrors += 1;
     }
@@ -219,6 +220,9 @@ async function main(): Promise<void> {
 
   // ---------------------------------------------------------------- report
   const latencies = samples.map((s) => s.ms).sort((a, b) => a - b);
+  const hotLatencies = samples.filter((s) => s.hot).map((s) => s.ms).sort((a, b) => a - b);
+  const coldLatencies = samples.filter((s) => !s.hot).map((s) => s.ms).sort((a, b) => a - b);
+  const pct = (sorted: number[]) => `${fmt(percentile(sorted, 50))} / ${fmt(percentile(sorted, 95))} / ${fmt(percentile(sorted, 99))}`;
   const byStatus = samples.reduce<Record<string, number>>((acc, s) => {
     acc[s.status] = (acc[s.status] ?? 0) + 1;
     return acc;
@@ -257,6 +261,8 @@ async function main(): Promise<void> {
 | Requests | ${samples.length} (${Object.entries(byOp).map(([k, v]) => `${k} ${v}`).join(', ')}) |
 | Throughput | ${fmt(samples.length / elapsedS)} req/s |
 | Latency p50 / p95 / p99 / max | ${fmt(percentile(latencies, 50))} / ${fmt(percentile(latencies, 95))} / ${fmt(percentile(latencies, 99))} / ${fmt(latencies.at(-1) ?? 0)} ms |
+| — hot wallet only (${hotLatencies.length} req) p50 / p95 / p99 | ${pct(hotLatencies)} ms |
+| — other ${walletCount - 1} wallets (${coldLatencies.length} req) p50 / p95 / p99 | ${pct(coldLatencies)} ms |
 | Status codes | ${Object.entries(byStatus).map(([k, v]) => `${k}: ${v}`).join(', ')} |
 | Error rate (5xx + network) | ${((errors / Math.max(1, samples.length + networkErrors)) * 100).toFixed(3)}% (${errors}) |
 | Idempotent replays detected (server) | ${delta('wagering_duplicates_detected_total')} |
