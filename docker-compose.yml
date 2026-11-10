@@ -1,0 +1,133 @@
+name: jungle-wagering
+
+# Shared runtime configuration of the application instances.
+x-app-env: &app-env
+  NODE_ENV: production
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  DATABASE_URL: postgres://wagering:wagering@postgres:5432/wagering
+  DATABASE_POOL_MAX: "10"
+  SQS_ENDPOINT: http://ministack:4566
+  AWS_REGION: us-east-1
+  AWS_ACCESS_KEY_ID: test
+  AWS_SECRET_ACCESS_KEY: test
+  SQS_AUTO_CREATE_QUEUES: "false"
+  WORKERS: consumer,outbox,pending-references
+  AUTH_MODE: ${AUTH_MODE:-keycloak}
+  # Issuer is pinned by KC_HOSTNAME, so tokens obtained from the host validate inside Docker.
+  AUTH_ISSUER: http://localhost:8080/realms/jungle
+  AUTH_JWKS_URL: http://keycloak:8080/realms/jungle/protocol/openid-connect/certs
+  AUTH_AUDIENCE: wagering-api
+
+services:
+  postgres:
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_USER: wagering
+      POSTGRES_PASSWORD: wagering
+      POSTGRES_DB: wagering
+    command: ["postgres", "-c", "max_connections=300"]
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wagering -d wagering"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  ministack:
+    image: ministackorg/ministack:1.5.39
+    ports:
+      - "4566:4566"
+    healthcheck:
+      # Works whichever HTTP client the image ships (curl, wget or Python).
+      test:
+        - CMD-SHELL
+        - >-
+          curl -fs http://127.0.0.1:4566/_ministack/health >/dev/null 2>&1 ||
+          wget -qO- http://127.0.0.1:4566/_ministack/health >/dev/null 2>&1 ||
+          python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4566/_ministack/health', timeout=2)" ||
+          python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4566/_ministack/health', timeout=2)"
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.4.2
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HOSTNAME: http://localhost:8080
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./docker/keycloak:/opt/keycloak/data/import:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q UP <&3"
+      interval: 5s
+      timeout: 5s
+      retries: 40
+
+  migrate:
+    build: { context: ., target: runtime }
+    command: ["bun", "run", "scripts/migrate.ts", "up"]
+    environment: *app-env
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: "no"
+
+  sqs-init:
+    build: { context: ., target: runtime }
+    command: ["bun", "run", "scripts/setup-sqs.ts"]
+    environment: *app-env
+    depends_on:
+      ministack: { condition: service_healthy }
+    restart: "no"
+
+  # Three identical instances: every role (HTTP, SQS consumer, outbox relay, pending
+  # references worker) runs concurrently on all of them.
+  app:
+    build: { context: ., target: runtime }
+    environment: *app-env
+    deploy:
+      replicas: 3
+    stop_grace_period: 30s
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      sqs-init: { condition: service_completed_successfully }
+      keycloak: { condition: service_healthy }
+
+  lb:
+    image: nginx:1.27.5-alpine
+    ports:
+      - "3000:80"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      app: { condition: service_healthy }
+
+  # Test runner inside Linux (POSIX signals: the SIGTERM test runs here).
+  #   docker compose --profile test run --rm tests                 # unit + integration + concurrency
+  #   docker compose --profile test run --rm tests bun run test:concurrency
+  tests:
+    profiles: ["test"]
+    build: { context: ., target: test }
+    environment:
+      TEST_DATABASE_URL: postgres://wagering:wagering@postgres:5432/wagering_test
+      TEST_SQS_ENDPOINT: http://ministack:4566
+      KEYCLOAK_URL: http://keycloak:8080
+    command: ["bun", "run", "test"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      ministack: { condition: service_healthy }
+      keycloak: { condition: service_healthy }
+
+volumes:
+  postgres-data:

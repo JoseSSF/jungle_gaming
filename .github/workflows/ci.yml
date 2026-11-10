@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUN_VERSION: 1.4.4
+
+jobs:
+  # ------------------------------------------------------------------ static checks + unit
+  unit:
+    name: Typecheck + unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run test:unit
+
+  # ------------------------------------------------------------------ real PostgreSQL + SQS + Keycloak
+  integration:
+    name: Integration + concurrency (real containers)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+
+      - name: Start infrastructure
+        run: docker compose up -d --wait --wait-timeout 300 postgres ministack keycloak
+
+      - name: Integration tests
+        env:
+          KEYCLOAK_URL: http://localhost:8080
+          TEST_LOG_LEVEL: warn
+        run: bun run test:integration
+
+      - name: Concurrency tests (≥3 processes, crashes, SIGTERM)
+        env:
+          TEST_LOG_LEVEL: warn
+        run: bun run test:concurrency
+
+      - name: Container diagnostics
+        if: failure()
+        run: |
+          docker compose ps -a
+          docker compose logs --no-color --tail=300
+
+  # ------------------------------------------------------------------ full stack (3 replicas + nginx) + load test
+  e2e-load:
+    name: Full stack + load test
+    runs-on: ubuntu-latest
+    needs: unit
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+
+      - name: Build and start the stack (3 app replicas behind nginx, Keycloak auth on)
+        run: |
+          docker compose up -d --build
+          for i in $(seq 1 140); do
+            if curl -fs http://localhost:3000/health/ready > /dev/null; then echo "stack ready"; exit 0; fi
+            sleep 3
+          done
+          echo "stack not ready in time"; docker compose ps -a; exit 1
+
+      - name: Smoke test through the load balancer
+        run: |
+          curl -fsS http://localhost:3000/health/live
+          curl -fsS http://localhost:3000/health/ready
+          OPERATOR=$(bun run --silent auth:token -- backoffice)
+          PROVIDER=$(bun run --silent auth:token -- provider-a)
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST localhost:3000/wallets -H 'content-type: application/json' -d '{}')" = "401"
+          WALLET=$(curl -fsS -X POST localhost:3000/wallets -H "authorization: Bearer $OPERATOR" -H 'content-type: application/json' \
+            -d '{"playerId":"ci-smoke-player","initialBalance":{"amount":"100.00","currency":"BRL"}}')
+          echo "$WALLET"
+          WALLET_ID=$(echo "$WALLET" | jq -r .id)
+          curl -fsS -X POST localhost:3000/wagering/transactions -H "authorization: Bearer $PROVIDER" \
+            -H 'content-type: application/json' -H 'Idempotency-Key: provider-a:ci-smoke-1' \
+            -d "{\"providerId\":\"provider-a\",\"externalTransactionId\":\"ci-smoke-1\",\"playerId\":\"ci-smoke-player\",\"walletId\":\"$WALLET_ID\",\"roundId\":\"r1\",\"gameId\":\"g1\",\"kind\":\"BET\",\"money\":{\"amount\":\"25.00\",\"currency\":\"BRL\"}}"
+          echo
+          curl -fsS -X POST "localhost:3000/wallets/$WALLET_ID/reconciliation" -H "authorization: Bearer $OPERATOR"
+          echo
+
+      - name: Load test
+        env:
+          LOAD_DURATION_S: '45'
+          LOAD_CONCURRENCY: '32'
+        run: bun run test:load
+
+      - name: Publish load report
+        if: always()
+        run: test -f load-report.md && cat load-report.md >> "$GITHUB_STEP_SUMMARY" || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: load-report
+          path: load-report.md
+          if-no-files-found: ignore
+
+      - name: Container diagnostics
+        if: failure()
+        run: |
+          docker compose ps -a
+          docker compose logs --no-color --tail=300

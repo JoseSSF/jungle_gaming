@@ -1,0 +1,22 @@
+/** Dependency-injection tokens (the application layer itself has no NestJS dependency). */
+export const TOKENS = {
+  config: Symbol('AppConfig'),
+  logger: Symbol('Logger'),
+  metrics: Symbol('AppMetrics'),
+  orm: Symbol('MikroORM'),
+  unitOfWork: Symbol('UnitOfWork'),
+  clock: Symbol('Clock'),
+  ids: Symbol('IdGenerator'),
+  faults: Symbol('FaultInjector'),
+  sqsClient: Symbol('SQSClient'),
+  sqsQueues: Symbol('SqsQueues'),
+  tokenVerifier: Symbol('AccessTokenVerifier'),
+  processor: Symbol('WagerTransactionProcessor'),
+  submitWager: Symbol('SubmitWagerTransactionUseCase'),
+  createWallet: Symbol('CreateWalletUseCase'),
+  reconcileWallet: Symbol('ReconcileWalletUseCase'),
+  queries: Symbol('WageringQueries'),
+  publishOutbox: Symbol('PublishOutboxUseCase'),
+  resolvePendingReferences: Symbol('ResolvePendingReferencesUseCase'),
+  consumer: Symbol('WagerTransactionConsumer'),
+} as const;

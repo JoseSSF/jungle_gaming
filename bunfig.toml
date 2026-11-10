@@ -1,0 +1,4 @@
+[test]
+# Integration/concurrency suites talk to real PostgreSQL + MiniStack; never run test files in parallel
+# inside the same process (each file manages its own app instances / subprocesses).
+preload = ["./test/support/preload.ts"]
