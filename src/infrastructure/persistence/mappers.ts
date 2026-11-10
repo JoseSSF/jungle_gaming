@@ -186,7 +186,8 @@ export function outboxToRecord(message: OutboxMessage): OutboxRecord {
     aggregateId: message.aggregateId,
     eventType: message.eventType,
     eventVersion: message.eventVersion,
-    payload: message.payload as Record<string, unknown>,
+    // The domain payload is deep-frozen; the ORM's JSON handling needs a plain mutable copy.
+    payload: structuredClone(message.payload) as Record<string, unknown>,
     occurredAt: message.occurredAt,
     attempts: message.attempts,
     nextAttemptAt: message.nextAttemptAt ?? null,
